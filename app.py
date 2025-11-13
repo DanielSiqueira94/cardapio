@@ -1,60 +1,31 @@
 import streamlit as st
-import sqlite3
 import datetime
 import os
 from pathlib import Path
 from PIL import Image
-import pandas as pd
+from supabase import create_client, Client
+from dotenv import load_dotenv
+
 
 # --------------------------------------------------------------
 # CONFIGURAÇÃO INICIAL
 # --------------------------------------------------------------
-st.set_page_config(page_title="Refeitório - MVP", page_icon="🍽️", layout="wide")
+st.set_page_config(page_title="Refeitório - Supabase", page_icon="🍽️", layout="wide")
 
-DATA_DIR = Path("data")
-IMG_DIR = DATA_DIR / "images"
-DB_PATH = DATA_DIR / "cardapio.db"
-
-os.makedirs(IMG_DIR, exist_ok=True)
-os.makedirs(DATA_DIR, exist_ok=True)
-
+load_dotenv()
 # --------------------------------------------------------------
-# BANCO DE DADOS
+# SUPABASE CLIENT
 # --------------------------------------------------------------
-def get_conn():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
+if not SUPABASE_URL or not SUPABASE_KEY:
+    st.error("❌ SUPABASE_URL ou SUPABASE_KEY não configurados. Configure em Secrets.")
+    st.stop()
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS unidades (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nome TEXT UNIQUE NOT NULL
-    );
-    """)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS cardapios (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        unidade_id INTEGER,
-        semana_inicio TEXT,
-        dia_semana TEXT,
-        categoria TEXT,
-        guarnicao TEXT,
-        proteina TEXT,
-        sobremesa TEXT,
-        imagem_path TEXT,
-        criado_em TEXT,
-        UNIQUE(unidade_id, semana_inicio, dia_semana, categoria)
-    );
-    """)
-
-    conn.commit()
-    conn.close()
-
-init_db()
+BUCKET = "cardapio"
 
 # --------------------------------------------------------------
 # USUÁRIOS
@@ -81,109 +52,97 @@ def chave_semana(segunda):
     return segunda.strftime("%Y-%m-%d")
 
 # --------------------------------------------------------------
-# DB FUNÇÕES
+# BANCO — SUPABASE
 # --------------------------------------------------------------
 def listar_unidades():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT nome FROM unidades ORDER BY nome;")
-    rows = [r[0] for r in cur.fetchall()]
-    conn.close()
-    return rows
+    resp = supabase.table("unidades").select("nome").order("nome").execute()
+    if resp.data:
+        return [u["nome"] for u in resp.data]
+    return []
 
 def criar_unidade(nome):
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute("INSERT INTO unidades(nome) VALUES (?)", (nome.strip(),))
-        conn.commit()
-    except:
-        pass
-    conn.close()
+    nome = nome.strip()
+    if nome:
+        supabase.table("unidades").insert({"nome": nome}).execute()
 
 def get_unidade_id(nome):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM unidades WHERE nome=?", (nome,))
-    row = cur.fetchone()
-    if row:
-        return row[0]
-    cur.execute("INSERT INTO unidades(nome) VALUES (?)", (nome,))
-    conn.commit()
-    new_id = cur.lastrowid
-    conn.close()
-    return new_id
+    resp = supabase.table("unidades").select("id").eq("nome", nome).execute()
+    if resp.data:
+        return resp.data[0]["id"]
 
-def salvar_cardapio(unidade, semana, dia, categoria, guarnicao, proteina, sobremesa, imagem_path):
+    novo = supabase.table("unidades").insert({"nome": nome}).execute()
+    return novo.data[0]["id"]
+
+def salvar_cardapio(unidade, semana_inicio, dia, categoria, guarnicao, proteina, sobremesa, imagem_url):
     unidade_id = get_unidade_id(unidade)
-    conn = get_conn()
-    cur = conn.cursor()
+
+    busca = supabase.table("cardapios").select("id").match({
+        "unidade_id": unidade_id,
+        "semana_inicio": semana_inicio,
+        "dia_semana": dia,
+        "categoria": categoria
+    }).execute()
+
     now = datetime.datetime.utcnow().isoformat()
 
-    cur.execute("""
-        SELECT id FROM cardapios
-        WHERE unidade_id=? AND semana_inicio=? AND dia_semana=? AND categoria=?
-    """, (unidade_id, semana, dia, categoria))
-
-    row = cur.fetchone()
-
-    if row:
-        cur.execute("""
-            UPDATE cardapios
-            SET guarnicao=?, proteina=?, sobremesa=?, imagem_path=?, criado_em=?
-            WHERE id=?
-        """, (guarnicao, proteina, sobremesa, imagem_path, now, row[0]))
+    if busca.data:
+        cid = busca.data[0]["id"]
+        supabase.table("cardapios").update({
+            "guarnicao": guarnicao,
+            "proteina": proteina,
+            "sobremesa": sobremesa,
+            "imagem_url": imagem_url,
+            "criado_em": now
+        }).eq("id", cid).execute()
     else:
-        cur.execute("""
-            INSERT INTO cardapios (
-                unidade_id, semana_inicio, dia_semana, categoria,
-                guarnicao, proteina, sobremesa, imagem_path, criado_em
-            ) VALUES (?,?,?,?,?,?,?,?,?)
-        """, (unidade_id, semana, dia, categoria,
-              guarnicao, proteina, sobremesa, imagem_path, now))
-
-    conn.commit()
-    conn.close()
+        supabase.table("cardapios").insert({
+            "unidade_id": unidade_id,
+            "semana_inicio": semana_inicio,
+            "dia_semana": dia,
+            "categoria": categoria,
+            "guarnicao": guarnicao,
+            "proteina": proteina,
+            "sobremesa": sobremesa,
+            "imagem_url": imagem_url
+        }).execute()
 
 def buscar_cardapio_semana(unidade, semana):
     unidade_id = get_unidade_id(unidade)
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT dia_semana, categoria, guarnicao, proteina, sobremesa, imagem_path
-        FROM cardapios
-        WHERE unidade_id=? AND semana_inicio=?
-    """, (unidade_id, semana))
-
-    rows = cur.fetchall()
-    conn.close()
+    resp = supabase.table("cardapios").select("*").match({
+        "unidade_id": unidade_id,
+        "semana_inicio": semana
+    }).execute()
 
     dias = {}
-    for dia, cat, g, p, s, img in rows:
-        dias.setdefault(dia, {})[cat] = {
-            "guarnicao": g,
-            "proteina": p,
-            "sobremesa": s,
-            "imagem": img
+    for r in resp.data:
+        d = r["dia_semana"]
+        c = r["categoria"]
+        dias.setdefault(d, {})[c] = {
+            "guarnicao": r["guarnicao"],
+            "proteina": r["proteina"],
+            "sobremesa": r["sobremesa"],
+            "imagem": r["imagem_url"]
         }
     return dias
 
-
 # --------------------------------------------------------------
-# UPLOAD DE IMAGEM
+# UPLOAD — SUPABASE STORAGE
 # --------------------------------------------------------------
-def salvar_imagem_upload(file_obj, prefix="img"):
+def salvar_imagem_upload(file_obj, prefix):
     if not file_obj:
         return None
+
+    content = file_obj.getvalue()
     ext = Path(file_obj.name).suffix
-    filename = f"{prefix}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S%f')}{ext}"
-    filepath = IMG_DIR / filename
-    with open(filepath, "wb") as f:
-        f.write(file_obj.getvalue())
-    return str(filepath)
+    filename = f"{prefix}_{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}{ext}"
+    path = f"imagens/{filename}"
+
+    supabase.storage.from_(BUCKET).upload(path, content)
+
+    return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{path}"
 
 # --------------------------------------------------------------
-# LOGIN
+# LOGIN UI
 # --------------------------------------------------------------
 def css_login():
     st.markdown("""
@@ -191,11 +150,8 @@ def css_login():
         [data-testid="stSidebar"] { display:none !important; }
         button[title="Main menu"] { display:none !important; }
         button[title="Show sidebar"] { display:none !important; }
-        [data-testid="collapsedControl"] { display:none !important; }
         .stTextInput, .stPasswordInput, .stButton {
-            max-width: 380px;
-            margin-left: auto;
-            margin-right: auto;
+            max-width: 380px; margin-left:auto; margin-right:auto;
         }
     </style>
     """, unsafe_allow_html=True)
@@ -208,6 +164,7 @@ def autenticar(usuario, senha):
 
 def tela_login():
     css_login()
+    st.write("")
     st.markdown("<h2 style='text-align:center'>🍽️ Refeitório — Login</h2>", unsafe_allow_html=True)
 
     user = st.text_input("Usuário")
@@ -215,7 +172,7 @@ def tela_login():
 
     if st.button("Entrar"):
         role = autenticar(user.strip(), pwd)
-        if role is None:
+        if not role:
             st.error("Usuário ou senha incorretos.")
         else:
             st.session_state.perfil = role
@@ -223,15 +180,14 @@ def tela_login():
             st.rerun()
 
 # --------------------------------------------------------------
-# SELECIONAR UNIDADE / SEMANA
+# SELEÇÃO DE UNIDADE / SEMANA
 # --------------------------------------------------------------
 def selecionar_unidade():
     st.sidebar.subheader("Unidade / Refeitório")
     unidades = listar_unidades()
 
     if st.session_state.perfil == "admin":
-        opcoes = ["-- Criar nova --"] + unidades
-        escolha = st.sidebar.selectbox("Selecione a unidade:", opcoes)
+        escolha = st.sidebar.selectbox("Selecione a unidade:", ["-- Criar nova --"] + unidades)
 
         if escolha == "-- Criar nova --":
             nome = st.sidebar.text_input("Nome da nova unidade")
@@ -241,7 +197,6 @@ def selecionar_unidade():
                     st.sidebar.success("Unidade criada.")
                     st.rerun()
             return None
-
         return escolha
 
     else:
@@ -260,13 +215,12 @@ def selecionar_semana_ui():
     return segunda, chave, label
 
 # --------------------------------------------------------------
-# TELA USUÁRIO
+# TELA DE USUÁRIO (VISUALIZAR)
 # --------------------------------------------------------------
 def tela_usuario(unidade):
-    st.sidebar.subheader(f"Usuário: {st.session_state.get('usuario', '-')}")
+    st.sidebar.subheader(f"Usuário: {st.session_state.usuario}")
     if st.sidebar.button("Sair"):
-        st.session_state.perfil = None
-        st.session_state.usuario = None
+        st.session_state.clear()
         st.rerun()
 
     if not unidade:
@@ -280,11 +234,11 @@ def tela_usuario(unidade):
 
     dias = ["segunda", "terca", "quarta", "quinta", "sexta"]
     nomes = {
-        "segunda": "Segunda-feira",
-        "terca": "Terça-feira",
-        "quarta": "Quarta-feira",
-        "quinta": "Quinta-feira",
-        "sexta": "Sexta-feira",
+        "segunda": "Segunda",
+        "terca": "Terça",
+        "quarta": "Quarta",
+        "quinta": "Quinta",
+        "sexta": "Sexta",
     }
     categorias = ["Almoço", "Jantar"]
 
@@ -305,12 +259,9 @@ def tela_usuario(unidade):
 
                 if item["imagem"]:
                     try:
-                        img = Image.open(item["imagem"])
-                        col1.image(img, width=120)
+                        col1.image(item["imagem"], width=120)
                     except:
                         col1.write("(imagem indisponível)")
-                else:
-                    col1.write("")
 
                 texto = f"**{c}**"
                 partes = []
@@ -325,16 +276,13 @@ def tela_usuario(unidade):
 
         st.markdown("---")
 
-
-
 # --------------------------------------------------------------
-# TELA ADMIN
+# TELA ADMIN (EDITAR)
 # --------------------------------------------------------------
 def tela_admin(unidade):
-    st.sidebar.subheader(f"Admin: {st.session_state.get('usuario')}")
+    st.sidebar.subheader(f"Admin: {st.session_state.usuario}")
     if st.sidebar.button("Sair"):
-        st.session_state.perfil = None
-        st.session_state.usuario = None
+        st.session_state.clear()
         st.rerun()
 
     if not unidade:
@@ -348,19 +296,21 @@ def tela_admin(unidade):
     dias = ["segunda", "terca", "quarta", "quinta", "sexta"]
     categorias = ["Almoço", "Jantar"]
 
-    key_temp = f"temp_{unidade}_{chave}"
+    key_temp = f"temp-{unidade}-{chave}"
 
     if key_temp not in st.session_state:
         origem = buscar_cardapio_semana(unidade, chave)
         st.session_state[key_temp] = {
-            d: {  
+            d: {
                 c: {
                     "guarnicao": origem.get(d, {}).get(c, {}).get("guarnicao", ""),
                     "proteina": origem.get(d, {}).get(c, {}).get("proteina", ""),
                     "sobremesa": origem.get(d, {}).get(c, {}).get("sobremesa", ""),
                     "imagem": origem.get(d, {}).get(c, {}).get("imagem", None),
-                } for c in categorias
-            } for d in dias
+                }
+                for c in categorias
+            }
+            for d in dias
         }
 
     with st.form("form_cardapio"):
@@ -375,10 +325,7 @@ def tela_admin(unidade):
                 pr = st.text_input(f"Proteína ({d}-{c})", value=temp["proteina"])
                 so = st.text_input(f"Sobremesa ({d}-{c})", value=temp["sobremesa"])
 
-                img_file = st.file_uploader(
-                    f"Imagem ({d}-{c})",
-                    type=['png','jpg','jpeg']
-                )
+                img_file = st.file_uploader(f"Imagem ({d}-{c})", type=['png', 'jpg', 'jpeg'])
 
                 if img_file:
                     temp["imagem"] = salvar_imagem_upload(img_file, prefix=f"{unidade}_{chave}_{d}_{c}")
@@ -399,7 +346,7 @@ def tela_admin(unidade):
                         item["guarnicao"],
                         item["proteina"],
                         item["sobremesa"],
-                        item["imagem"]
+                        item["imagem"],
                     )
 
         st.success(f"Cardápio da {label} salvo com sucesso!")
@@ -408,7 +355,6 @@ def tela_admin(unidade):
             d: {c: {"guarnicao": "", "proteina": "", "sobremesa": "", "imagem": None} for c in categorias}
             for d in dias
         }
-
         st.rerun()
 
 # --------------------------------------------------------------
@@ -423,10 +369,9 @@ def main():
         return
 
     unidade = selecionar_unidade()
-    role = st.session_state.perfil
 
     paginas = ["Visualizar Cardápio"]
-    if role == "admin":
+    if st.session_state.perfil == "admin":
         paginas.append("Administrar")
 
     escolha = st.sidebar.selectbox("Página", paginas)
