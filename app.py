@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py — Refeitório com Supabase (Versão Completa e Corrigida)
+# app.py — Refeitório com Supabase (Versão Revisada Completa)
 # --------------------------------------------------------------
 import os
 import datetime
@@ -8,7 +8,6 @@ import unicodedata
 from pathlib import Path
 
 import streamlit as st
-from PIL import Image
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
@@ -20,17 +19,11 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    st.error("❌ SUPABASE_URL e/ou SUPABASE_KEY não configurados. Configure em .env (local) ou Secrets (Streamlit Cloud).")
+    st.error("❌ SUPABASE_URL e/ou SUPABASE_KEY não configurados.")
     st.stop()
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 BUCKET = "cardapio"  # bucket público
-
-# -------------------- USERS (MVP) --------------------
-USERS = {
-    "admin": {"pwd": "1234", "role": "admin"},
-    "mylena": {"pwd": "4321", "role": "user"},
-}
 
 # -------------------- HELPERS DE DATA --------------------
 def segunda_da_semana(data: datetime.date):
@@ -85,14 +78,13 @@ def salvar_cardapio(unidade, semana, dia, categoria, guarnicao, proteina, sobrem
     }).limit(1).execute()
 
     if busca.data:
-        cid = busca.data[0]["id"]
         supabase.table("cardapios").update({
             "guarnicao": guarnicao,
             "proteina": proteina,
             "sobremesa": sobremesa,
             "imagem_url": imagem_url,
             "criado_em": datetime.datetime.utcnow().isoformat(),
-        }).eq("id", cid).execute()
+        }).eq("id", busca.data[0]["id"]).execute()
     else:
         supabase.table("cardapios").insert({
             "unidade_id": unidade_id,
@@ -168,7 +160,7 @@ def salvar_imagem_upload(file_obj, prefix):
         filename = f"{prefix_clean}_{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}{ext}"
         path = f"imagens/{filename}"
 
-        result = supabase.storage.from_(BUCKET).upload(
+        supabase.storage.from_(BUCKET).upload(
             path=path,
             file=content,
             file_options={"content-type": f"image/{ext_clean}"}
@@ -182,8 +174,23 @@ def salvar_imagem_upload(file_obj, prefix):
 
 # -------------------- LOGIN --------------------
 def autenticar(usuario, senha):
-    u = USERS.get(usuario)
-    return u["role"] if u and u["pwd"] == senha else None
+    try:
+        resp = (
+            supabase.table("usuarios")
+            .select("senha, role")
+            .eq("usuario", usuario)
+            .limit(1)
+            .execute()
+        )
+        if not resp.data:
+            return None
+
+        user = resp.data[0]
+        return user["role"] if user["senha"] == senha else None
+
+    except Exception as e:
+        st.error(f"Erro ao autenticar: {e}")
+        return None
 
 def css_login():
     st.markdown("""
@@ -274,7 +281,7 @@ def tela_usuario(unidade):
     segunda, chave, label = selecionar_semana_ui()
     dados = buscar_cardapio_semana(unidade, chave)
 
-    dias = ["segunda", "terca", "quarta", "quinta", "sexta"]
+    dias = ["sexta", "quinta", "quarta", "terca", "segunda"][::-1]
     nomes = {
         "segunda": "Segunda-feira",
         "terca": "Terça-feira",
@@ -309,7 +316,6 @@ def tela_usuario(unidade):
                     f"Sobremesa: {item['sobremesa']}",
                     unsafe_allow_html=True
                 )
-
         st.markdown("---")
 
 # -------------------- TELA ADMIN (CARDÁPIO) --------------------
@@ -417,21 +423,78 @@ def tela_avisos(unidade):
                     st.success("Aviso desativado!")
                     st.rerun()
 
+# -------------------- TELA USUÁRIOS --------------------
+def tela_usuarios():
+    st.sidebar.subheader(f"Admin: {st.session_state.usuario}")
+    if st.sidebar.button("Sair"):
+        st.session_state.clear()
+        st.rerun()
+
+    st.title("👥 Gerenciamento de Usuários")
+
+    st.subheader("Cadastrar novo usuário")
+
+    with st.form("form_user"):
+        novo_usuario = st.text_input("Usuário")
+        nova_senha = st.text_input("Senha", type="password")
+        role = st.selectbox("Perfil", ["user", "admin"])
+
+        criar = st.form_submit_button("Cadastrar")
+
+    if criar:
+        if not novo_usuario.strip() or not nova_senha.strip():
+            st.error("Usuário e senha são obrigatórios.")
+        else:
+            try:
+                supabase.table("usuarios").insert({
+                    "usuario": novo_usuario.strip(),
+                    "senha": nova_senha.strip(),
+                    "role": role
+                }).execute()
+                st.success("Usuário cadastrado com sucesso!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao cadastrar: {e}")
+
+    st.subheader("Usuários Cadastrados")
+    lista = supabase.table("usuarios").select("id, usuario, role").execute().data
+
+    if lista:
+        for u in lista:
+            col1, col2, col3 = st.columns([3,2,2])
+            col1.write(f"👤 {u['usuario']}")
+            col2.write(f"🔑 {u['role']}")
+
+            if col3.button("Excluir", key=f"del_{u['id']}"):
+                supabase.table("usuarios").delete().eq("id", u["id"]).execute()
+                st.success("Usuário removido.")
+                st.rerun()
+    else:
+        st.info("Nenhum usuário cadastrado.")
+
 # -------------------- MAIN --------------------
 def main():
     if "perfil" not in st.session_state:
         st.session_state.perfil = None
 
+    # Se não logado -> tela de login + sidebar oculta
     if st.session_state.perfil is None:
         tela_login()
         return
+
+    # Após login -> mostrar sidebar normalmente
+    st.markdown("""
+    <style>
+        [data-testid="stSidebar"] { display:block !important; }
+    </style>
+    """, unsafe_allow_html=True)
 
     unidade = selecionar_unidade()
     role = st.session_state.perfil
 
     paginas = ["Visualizar Cardápio"]
     if role == "admin":
-        paginas += ["Administrar", "Avisos"]
+        paginas += ["Administrar", "Avisos", "Usuários"]
 
     escolha = st.sidebar.selectbox("Página", paginas)
 
@@ -441,6 +504,8 @@ def main():
         tela_admin(unidade)
     elif escolha == "Avisos":
         tela_avisos(unidade)
+    elif escolha == "Usuários":
+        tela_usuarios()
 
 if __name__ == "__main__":
     main()
