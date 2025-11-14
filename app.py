@@ -158,7 +158,10 @@ def salvar_imagem_upload(file_obj, prefix):
         prefix_clean = sanitize_filename(prefix)
 
         filename = f"{prefix_clean}_{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}{ext}"
-        path = f"imagens/{filename}"
+
+        # AGRUPAR IMAGENS POR UNIDADE
+        unidade = prefix_clean.split("_")[0]   # usa a unidade como pasta
+        path = f"imagens/{unidade}/{filename}"
 
         supabase.storage.from_(BUCKET).upload(
             path=path,
@@ -171,6 +174,7 @@ def salvar_imagem_upload(file_obj, prefix):
     except Exception as e:
         st.error(f"Erro ao enviar imagem: {e}")
         return None
+
 
 # -------------------- LOGIN --------------------
 def autenticar(usuario, senha):
@@ -340,17 +344,25 @@ def tela_admin(unidade):
     dias = ["segunda", "terca", "quarta", "quinta", "sexta"]
     categorias = ["Almoço", "Jantar"]
 
+    # estado temporário por (unidade + semana)
     key_temp = f"tmp_{unidade}_{chave}"
 
+    # carregar dados existentes no estado
     if key_temp not in st.session_state:
         origem = buscar_cardapio_semana(unidade, chave)
         st.session_state[key_temp] = {
-            d: {c: {
-                "guarnicao": origem.get(d, {}).get(c, {}).get("guarnicao", ""),
-                "proteina": origem.get(d, {}).get(c, {}).get("proteina", ""),
-                "sobremesa": origem.get(d, {}).get(c, {}).get("sobremesa", ""),
-                "imagem": origem.get(d, {}).get(c, {}).get("imagem", None),
-            } for c in categorias} for d in dias
+            d: {
+                c: {
+                    "guarnicao": origem.get(d, {}).get(c, {}).get("guarnicao", ""),
+                    "proteina": origem.get(d, {}).get(c, {}).get("proteina", ""),
+                    "sobremesa": origem.get(d, {}).get(c, {}).get("sobremesa", ""),
+                    "imagem": origem.get(d, {}).get(c, {}).get("imagem", None),
+                    # aqui não fazemos upload; apenas placeholder
+                    "img_file": None
+                }
+                for c in categorias
+            }
+            for d in dias
         }
 
     with st.form("form_cardapio"):
@@ -361,21 +373,44 @@ def tela_admin(unidade):
 
                 temp = st.session_state[key_temp][d][c]
 
-                temp["guarnicao"] = st.text_input(f"Guarnição ({d}-{c})", temp["guarnicao"])
-                temp["proteina"] = st.text_input(f"Proteína ({d}-{c})", temp["proteina"])
-                temp["sobremesa"] = st.text_input(f"Sobremesa ({d}-{c})", temp["sobremesa"])
+                temp["guarnicao"] = st.text_input(
+                    f"Guarnição ({d}-{c})", temp["guarnicao"]
+                )
+                temp["proteina"] = st.text_input(
+                    f"Proteína ({d}-{c})", temp["proteina"]
+                )
+                temp["sobremesa"] = st.text_input(
+                    f"Sobremesa ({d}-{c})", temp["sobremesa"]
+                )
 
-                img_file = st.file_uploader(f"Imagem ({d}-{c})", type=["jpg", "jpeg", "png"])
-                if img_file:
-                    prefix = f"{unidade}_{chave}_{d}_{c}"
-                    temp["imagem"] = salvar_imagem_upload(img_file, prefix)
+                # 🔥 AGORA: upload NÃO faz mais upload real
+                img = st.file_uploader(
+                    f"Imagem ({d}-{c})",
+                    type=["jpg", "jpeg", "png"],
+                    key=f"img_{unidade}_{chave}_{d}_{c}"
+                )
+
+                if img:
+                    temp["img_file"] = img  # apenas guarda o arquivo
 
         salvar = st.form_submit_button("💾 Salvar Cardápio")
 
+    # Upload real só acontece aqui
     if salvar:
         for d in dias:
             for c in categorias:
                 item = st.session_state[key_temp][d][c]
+
+                # imagem atual salva no BD (se já existia)
+                img_url = item.get("imagem")
+
+                # se o usuário anexou uma nova imagem, agora sim fazemos upload:
+                if item["img_file"] is not None:
+                    prefix = f"{unidade}_{chave}_{d}_{c}"
+                    img_url = salvar_imagem_upload(item["img_file"], prefix)
+                    item["imagem"] = img_url  # atualizar
+
+                # só salva se houver alguma informação
                 if any([item["guarnicao"], item["proteina"], item["sobremesa"]]):
                     salvar_cardapio(
                         unidade,
@@ -385,11 +420,12 @@ def tela_admin(unidade):
                         item["guarnicao"],
                         item["proteina"],
                         item["sobremesa"],
-                        item["imagem"]
+                        img_url  # imagem final (antiga ou nova)
                     )
 
         st.success(f"Cardápio da {label} salvo com sucesso!")
         st.rerun()
+
 
 # -------------------- TELA AVISOS --------------------
 def tela_avisos(unidade):
