@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py — Refeitório com Supabase (Versão Revisada Completa)
+# app.py — Refeitório com Supabase (Versão Revisada com Unidade por Usuário)
 # --------------------------------------------------------------
 import os
 import datetime
@@ -177,7 +177,7 @@ def autenticar(usuario, senha):
     try:
         resp = (
             supabase.table("usuarios")
-            .select("senha, role")
+            .select("senha, role, unidade")
             .eq("usuario", usuario)
             .limit(1)
             .execute()
@@ -186,7 +186,11 @@ def autenticar(usuario, senha):
             return None
 
         user = resp.data[0]
-        return user["role"] if user["senha"] == senha else None
+
+        if user["senha"] == senha:
+            return {"role": user["role"], "unidade": user["unidade"]}
+
+        return None
 
     except Exception as e:
         st.error(f"Erro ao autenticar: {e}")
@@ -214,12 +218,13 @@ def tela_login():
     senha = st.text_input("Senha", type="password")
 
     if st.button("Entrar"):
-        role = autenticar(usuario.strip(), senha)
-        if not role:
+        auth = autenticar(usuario.strip(), senha)
+        if not auth:
             st.error("Usuário ou senha incorretos.")
         else:
-            st.session_state.perfil = role
+            st.session_state.perfil = auth["role"]
             st.session_state.usuario = usuario.strip()
+            st.session_state.unidade_user = auth["unidade"]
             st.rerun()
 
 # -------------------- SELETOR DE UNIDADE/SEMANA --------------------
@@ -227,6 +232,7 @@ def selecionar_unidade():
     st.sidebar.subheader("Unidade / Refeitório")
     unidades = listar_unidades()
 
+    # ADMIN → pode escolher
     if st.session_state.perfil == "admin":
         escolha = st.sidebar.selectbox("Selecione a unidade:", ["-- Criar nova --"] + unidades)
 
@@ -241,11 +247,9 @@ def selecionar_unidade():
 
         return escolha
 
+    # USER → vê apenas a própria unidade
     else:
-        if not unidades:
-            st.sidebar.warning("Nenhuma unidade cadastrada.")
-            return None
-        return st.sidebar.selectbox("Selecione a unidade:", unidades)
+        return st.session_state.unidade_user
 
 def selecionar_semana_ui():
     hoje = datetime.date.today()
@@ -439,6 +443,9 @@ def tela_usuarios():
         nova_senha = st.text_input("Senha", type="password")
         role = st.selectbox("Perfil", ["user", "admin"])
 
+        unidades = listar_unidades()
+        unidade_user = st.selectbox("Unidade do usuário", unidades)
+
         criar = st.form_submit_button("Cadastrar")
 
     if criar:
@@ -449,7 +456,8 @@ def tela_usuarios():
                 supabase.table("usuarios").insert({
                     "usuario": novo_usuario.strip(),
                     "senha": nova_senha.strip(),
-                    "role": role
+                    "role": role,
+                    "unidade": unidade_user
                 }).execute()
                 st.success("Usuário cadastrado com sucesso!")
                 st.rerun()
@@ -457,15 +465,16 @@ def tela_usuarios():
                 st.error(f"Erro ao cadastrar: {e}")
 
     st.subheader("Usuários Cadastrados")
-    lista = supabase.table("usuarios").select("id, usuario, role").execute().data
+    lista = supabase.table("usuarios").select("id, usuario, role, unidade").execute().data
 
     if lista:
         for u in lista:
-            col1, col2, col3 = st.columns([3,2,2])
+            col1, col2, col3, col4 = st.columns([3,2,2,2])
             col1.write(f"👤 {u['usuario']}")
             col2.write(f"🔑 {u['role']}")
+            col3.write(f"🏢 {u['unidade']}")
 
-            if col3.button("Excluir", key=f"del_{u['id']}"):
+            if col4.button("Excluir", key=f"del_{u['id']}"):
                 supabase.table("usuarios").delete().eq("id", u["id"]).execute()
                 st.success("Usuário removido.")
                 st.rerun()
@@ -482,7 +491,7 @@ def main():
         tela_login()
         return
 
-    # Após login -> mostrar sidebar normalmente
+    # Após login → sidebar aparece
     st.markdown("""
     <style>
         [data-testid="stSidebar"] { display:block !important; }
@@ -494,7 +503,7 @@ def main():
 
     paginas = ["Visualizar Cardápio"]
     if role == "admin":
-        paginas += ["Administrar", "Avisos", "Usuários"]
+        paginas += ["Administrar", "Avisos", "Usuarios"]
 
     escolha = st.sidebar.selectbox("Página", paginas)
 
@@ -504,7 +513,7 @@ def main():
         tela_admin(unidade)
     elif escolha == "Avisos":
         tela_avisos(unidade)
-    elif escolha == "Usuários":
+    elif escolha == "Usuarios":
         tela_usuarios()
 
 if __name__ == "__main__":
