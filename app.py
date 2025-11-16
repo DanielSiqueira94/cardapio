@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py — Refeitório com Supabase (Versão Revisada com Unidade por Usuário)
+# app.py — Refeitório com Supabase (Versão Revisada com admin_unidade)
 # --------------------------------------------------------------
 import os
 import datetime
@@ -50,19 +50,32 @@ def listar_unidades():
 
 def criar_unidade(nome):
     try:
-        supabase.table("unidades").insert({"nome": nome.strip()}).execute()
-    except:
-        pass
+        nm = nome.strip()
+        if not nm:
+            return
+        # evita duplicatas
+        exist = supabase.table("unidades").select("id").eq("nome", nm).limit(1).execute()
+        if exist.data:
+            return
+        supabase.table("unidades").insert({"nome": nm}).execute()
+    except Exception as e:
+        st.error(f"Erro ao criar unidade: {e}")
 
 def get_unidade_id(nome):
     try:
+        if not nome:
+            return None
         resp = supabase.table("unidades").select("id").eq("nome", nome).limit(1).execute()
         if resp.data:
             return resp.data[0]["id"]
 
+        # se não existe, cria e retorna id
         novo = supabase.table("unidades").insert({"nome": nome}).execute()
-        return novo.data[0]["id"]
-    except:
+        if novo.data:
+            return novo.data[0]["id"]
+        return None
+    except Exception as e:
+        # não propagar erro para UX
         return None
 
 def salvar_cardapio(unidade, semana, dia, categoria, guarnicao, proteina, sobremesa, imagem_url):
@@ -99,6 +112,8 @@ def salvar_cardapio(unidade, semana, dia, categoria, guarnicao, proteina, sobrem
 
 def buscar_cardapio_semana(unidade, semana):
     unidade_id = get_unidade_id(unidade)
+    if not unidade_id:
+        return {}
     resp = supabase.table("cardapios").select("*").match({
         "unidade_id": unidade_id,
         "semana_inicio": semana
@@ -107,16 +122,18 @@ def buscar_cardapio_semana(unidade, semana):
     dias = {}
     for r in resp.data or []:
         dias.setdefault(r["dia_semana"], {})[r["categoria"]] = {
-            "guarnicao": r["guarnicao"],
-            "proteina": r["proteina"],
-            "sobremesa": r["sobremesa"],
-            "imagem": r["imagem_url"]
+            "guarnicao": r.get("guarnicao", ""),
+            "proteina": r.get("proteina", ""),
+            "sobremesa": r.get("sobremesa", ""),
+            "imagem": r.get("imagem_url")
         }
     return dias
 
 # -------------------- AVISOS --------------------
 def criar_aviso(unidade_nome, titulo, mensagem):
     unidade_id = get_unidade_id(unidade_nome)
+    if not unidade_id:
+        return
     supabase.table("avisos").insert({
         "unidade_id": unidade_id,
         "titulo": titulo,
@@ -127,6 +144,8 @@ def criar_aviso(unidade_nome, titulo, mensagem):
 
 def listar_avisos(unidade_nome):
     unidade_id = get_unidade_id(unidade_nome)
+    if not unidade_id:
+        return []
     resp = (
         supabase.table("avisos")
         .select("*")
@@ -175,7 +194,6 @@ def salvar_imagem_upload(file_obj, prefix):
         st.error(f"Erro ao enviar imagem: {e}")
         return None
 
-
 # -------------------- LOGIN --------------------
 def autenticar(usuario, senha):
     try:
@@ -192,7 +210,10 @@ def autenticar(usuario, senha):
         user = resp.data[0]
 
         if user["senha"] == senha:
-            return {"role": user["role"], "unidade": user["unidade"]}
+            # garante que role e unidade existem
+            role = user.get("role") or "user"
+            unidade = user.get("unidade") or ""
+            return {"role": role, "unidade": unidade}
 
         return None
 
@@ -236,7 +257,7 @@ def selecionar_unidade():
     st.sidebar.subheader("Unidade / Refeitório")
     unidades = listar_unidades()
 
-    # ADMIN → pode escolher
+    # ADMIN → pode escolher qualquer unidade e criar novas
     if st.session_state.perfil == "admin":
         escolha = st.sidebar.selectbox("Selecione a unidade:", ["-- Criar nova --"] + unidades)
 
@@ -251,9 +272,12 @@ def selecionar_unidade():
 
         return escolha
 
-    # USER → vê apenas a própria unidade
-    else:
+    # USER e ADMIN_UNIDADE → só podem usar sua própria unidade
+    if st.session_state.perfil in ["user", "admin_unidade"]:
         return st.session_state.unidade_user
+
+    # fallback
+    return None
 
 def selecionar_semana_ui():
     hoje = datetime.date.today()
@@ -315,7 +339,10 @@ def tela_usuario(unidade):
                 col1, col2 = st.columns([1, 3])
 
                 if item["imagem"]:
-                    col1.image(item["imagem"], width=120)
+                    try:
+                        col1.image(item["imagem"], width=120)
+                    except Exception:
+                        pass
 
                 col2.markdown(
                     f"**{c}**<br>"
@@ -426,7 +453,6 @@ def tela_admin(unidade):
         st.success(f"Cardápio da {label} salvo com sucesso!")
         st.rerun()
 
-
 # -------------------- TELA AVISOS --------------------
 def tela_avisos(unidade):
     st.title("🔔 Avisos do Refeitório")
@@ -458,18 +484,26 @@ def tela_avisos(unidade):
         for av in avisos:
             with st.expander(f"{av['titulo']} — {av['criado_em']}"):
                 st.write(av["mensagem"])
-                if st.button(f"Desativar aviso {av['id']}", key=f"del_{av['id']}"):
-                    desativar_aviso(av["id"])
-                    st.success("Aviso desativado!")
-                    st.rerun()
+                # permissões: admin pode desativar qualquer; admin_unidade pode desativar apenas da sua unidade
+                pode_desativar = st.session_state.perfil in ["admin", "admin_unidade"]
+                if pode_desativar:
+                    if st.button(f"Desativar aviso {av['id']}", key=f"del_{av['id']}"):
+                        desativar_aviso(av["id"])
+                        st.success("Aviso desativado!")
+                        st.rerun()
 
 # -------------------- TELA USUÁRIOS --------------------
 def tela_usuarios():
-    st.sidebar.subheader(f"Admin: {st.session_state.usuario}")
     if st.sidebar.button("Sair"):
         st.session_state.clear()
         st.rerun()
 
+    # controle de acesso: apenas admin e admin_unidade
+    if st.session_state.perfil not in ["admin", "admin_unidade"]:
+        st.error("Acesso negado.")
+        return
+
+    st.sidebar.subheader(f"Admin: {st.session_state.usuario}")
     st.title("👥 Gerenciamento de Usuários")
 
     st.subheader("Cadastrar novo usuário")
@@ -477,10 +511,20 @@ def tela_usuarios():
     with st.form("form_user"):
         novo_usuario = st.text_input("Usuário")
         nova_senha = st.text_input("Senha", type="password")
-        role = st.selectbox("Perfil", ["user", "admin"])
 
-        unidades = listar_unidades()
-        unidade_user = st.selectbox("Unidade do usuário", unidades)
+        # role selection: admin pode criar qualquer role; admin_unidade só user ou admin_unidade
+        if st.session_state.perfil == "admin":
+            role = st.selectbox("Perfil", ["user", "admin", "admin_unidade"])
+        else:
+            role = st.selectbox("Perfil", ["user", "admin_unidade"])
+
+        # unidade selection: admin escolhe, admin_unidade fixa na sua unidade
+        if st.session_state.perfil == "admin":
+            unidades = listar_unidades()
+            unidade_user = st.selectbox("Unidade do usuário", unidades)
+        else:
+            unidade_user = st.session_state.unidade_user
+            st.write(f"Unidade: **{unidade_user}**")
 
         criar = st.form_submit_button("Cadastrar")
 
@@ -501,7 +545,11 @@ def tela_usuarios():
                 st.error(f"Erro ao cadastrar: {e}")
 
     st.subheader("Usuários Cadastrados")
-    lista = supabase.table("usuarios").select("id, usuario, role, unidade").execute().data
+    # lista: admin vê todos; admin_unidade vê só usuários da sua unidade
+    if st.session_state.perfil == "admin":
+        lista = supabase.table("usuarios").select("id, usuario, role, unidade").execute().data or []
+    else:
+        lista = supabase.table("usuarios").select("id, usuario, role, unidade").eq("unidade", st.session_state.unidade_user).execute().data or []
 
     if lista:
         for u in lista:
@@ -510,10 +558,23 @@ def tela_usuarios():
             col2.write(f"🔑 {u['role']}")
             col3.write(f"🏢 {u['unidade']}")
 
-            if col4.button("Excluir", key=f"del_{u['id']}"):
-                supabase.table("usuarios").delete().eq("id", u["id"]).execute()
-                st.success("Usuário removido.")
-                st.rerun()
+            # permissões de exclusão: admin sempre; admin_unidade apenas para usuários da mesma unidade
+            pode_excluir = False
+            if st.session_state.perfil == "admin":
+                pode_excluir = True
+            elif st.session_state.perfil == "admin_unidade" and u["unidade"] == st.session_state.unidade_user:
+                pode_excluir = True
+
+            if pode_excluir:
+                if col4.button("Excluir", key=f"del_{u['id']}"):
+                    try:
+                        supabase.table("usuarios").delete().eq("id", u["id"]).execute()
+                        st.success("Usuário removido.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao remover usuário: {e}")
+            else:
+                col4.write("—")
     else:
         st.info("Nenhum usuário cadastrado.")
 
@@ -539,6 +600,9 @@ def main():
 
     paginas = ["Visualizar Cardápio"]
     if role == "admin":
+        paginas += ["Administrar", "Avisos", "Usuarios"]
+    elif role == "admin_unidade":
+        # admin_unidade tem acesso às mesmas páginas, mas as ações são limitadas pelo código acima
         paginas += ["Administrar", "Avisos", "Usuarios"]
 
     escolha = st.sidebar.selectbox("Página", paginas)
