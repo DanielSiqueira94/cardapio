@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py — Refeitório migrado para Supabase Auth + profiles
+# app.py — Refeitório migrado para Supabase Auth + profiles (Free / Premium por unidade)
 # --------------------------------------------------------------
 import os
 import datetime
@@ -16,7 +16,6 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # public anon key is ok for client-side auth operations
 SERVICE_ROLE_KEY = os.getenv("SERVICE_ROLE_KEY")  # OPTIONAL: only for admin-create-user operations server-side
-
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     st.error("❌ SUPABASE_URL e/ou SUPABASE_KEY não configurados.")
@@ -48,13 +47,13 @@ def sanitize_filename(text: str):
 # -------------------- DB wrappers (cardapio/avisos unchanged) --------------------
 def listar_unidades():
     try:
-        resp = supabase.table("unidades").select("nome").order("nome", desc=False).execute()
-        return [r["nome"] for r in resp.data] if resp.data else []
+        resp = supabase.table("unidades").select("nome, plano").order("nome", desc=False).execute()
+        return resp.data or []
     except Exception as e:
         st.error(f"Erro ao listar unidades: {e}")
         return []
 
-def criar_unidade(nome):
+def criar_unidade(nome, plano="free"):
     try:
         nm = nome.strip()
         if not nm:
@@ -62,7 +61,7 @@ def criar_unidade(nome):
         exist = supabase.table("unidades").select("id").eq("nome", nm).limit(1).execute()
         if exist.data:
             return
-        supabase.table("unidades").insert({"nome": nm}).execute()
+        supabase.table("unidades").insert({"nome": nm, "plano": plano}).execute()
     except Exception as e:
         st.error(f"Erro ao criar unidade: {e}")
 
@@ -188,51 +187,52 @@ def sign_in(email_or_usuario, senha):
     - Se usuário digitar nome (usuario_text), buscamos email no profiles.
     - Se digitar email, logamos direto.
     """
-
-    # Determinar email real para login
     email = email_or_usuario.strip()
-
     if "@" not in email:
-        # buscar email correspondente ao usuario_text
-        resp = supabase.table("profiles")\
-            .select("email")\
-            .ilike("usuario_text", email_or_usuario)\
-            .limit(1)\
-            .execute()
-
+        resp = supabase.table("profiles").select("email").ilike("usuario_text", email_or_usuario).limit(1).execute()
         if resp.data:
             email = resp.data[0]["email"]
         else:
-            # usuário não existe no profiles → evita erro
             return None, None
 
     try:
-        # Login supabase-py 2.x -->
-        auth_resp = supabase.auth.sign_in_with_password({
-            "email": email,
-            "password": senha
-        })
-
+        auth_resp = supabase.auth.sign_in_with_password({"email": email, "password": senha})
         user = auth_resp.user
         session = auth_resp.session
-
         if user:
             return user, session
-
         return None, None
-
     except Exception as e:
         st.error(f"Erro ao autenticar: {e}")
         return None, None
 
-
 def get_profile(user_id):
     if not user_id:
         return None
-    resp = supabase.table("profiles").select("*").eq("id", user_id).limit(1).execute()
+    # user_id may be uuid or string
+    resp = supabase.table("profiles").select("*").eq("id", str(user_id)).limit(1).execute()
     if resp.data:
         return resp.data[0]
     return None
+
+def get_unidade_plano(unidade_nome):
+    """Retorna 'free' ou 'premium' para a unidade (por nome)"""
+    resp = supabase.table("unidades").select("plano").eq("nome", unidade_nome).limit(1).execute()
+    if resp.data:
+        return resp.data[0].get("plano", "free")
+    return "free"
+
+def count_users_in_unidade(unidade_nome):
+    resp = supabase.table("profiles").select("id").eq("unidade", unidade_nome).execute()
+    if resp.data:
+        return len(resp.data)
+    return 0
+
+def count_admin_unidade_in_unidade(unidade_nome):
+    resp = supabase.table("profiles").select("id").eq("unidade", unidade_nome).eq("role", "admin_unidade").execute()
+    if resp.data:
+        return len(resp.data)
+    return 0
 
 def create_user_via_service_role(email, password, usuario_text, role, unidade):
     """
@@ -302,7 +302,7 @@ def tela_login():
             # salva sessão e perfil
             st.session_state.user = user
             st.session_state.session = session
-            # buscar profile
+            # buscar profile (user.id is attribute)
             profile = get_profile(user.id)
             st.session_state.perfil = profile["role"] if profile and profile.get("role") else "user"
             st.session_state.unidade_user = profile.get("unidade") if profile else ""
@@ -314,14 +314,16 @@ def tela_login():
 def selecionar_unidade():
     st.sidebar.subheader("Unidade / Refeitório")
     unidades = listar_unidades()
+    unidades_nomes = [u["nome"] for u in unidades]
 
     if st.session_state.perfil == "admin":
-        escolha = st.sidebar.selectbox("Selecione a unidade:", ["-- Criar nova --"] + unidades)
+        escolha = st.sidebar.selectbox("Selecione a unidade:", ["-- Criar nova --"] + unidades_nomes)
         if escolha == "-- Criar nova --":
             nome = st.sidebar.text_input("Nome da nova unidade")
+            plano_novo = st.sidebar.selectbox("Plano da nova unidade", ["free","premium"])
             if st.sidebar.button("Criar"):
                 if nome.strip():
-                    criar_unidade(nome.strip())
+                    criar_unidade(nome.strip(), plano=plano_novo)
                     st.success("Unidade criada.")
                     st.rerun()
             return None
@@ -508,7 +510,8 @@ def tela_usuarios():
 
         if st.session_state.perfil == "admin":
             unidades = listar_unidades()
-            unidade_user = st.selectbox("Unidade do usuário", unidades)
+            unidades_nomes = [u["nome"] for u in unidades]
+            unidade_user = st.selectbox("Unidade do usuário", unidades_nomes)
         else:
             unidade_user = st.session_state.unidade_user
             st.write(f"Unidade: **{unidade_user}**")
@@ -523,20 +526,45 @@ def tela_usuarios():
             if novo_email.strip():
                 email = novo_email.strip()
             else:
-                # fallback: build email from username
                 safe = novo_usuario.strip().replace(" ", "_")
                 email = f"{safe}@local.invalid"
 
-            # If SERVICE_ROLE_KEY available, create user via admin endpoint
-            if SERVICE_ROLE_KEY:
-                ok, msg = create_user_via_service_role(email, nova_senha, novo_usuario.strip(), role, unidade_user)
-                if ok:
-                    st.success("Usuário criado com sucesso (Auth + profile).")
-                    st.rerun()
+            # CHECK: plano da unidade
+            plano = get_unidade_plano(unidade_user)
+            total_users = count_users_in_unidade(unidade_user)
+            total_admins = count_admin_unidade_in_unidade(unidade_user)
+
+            # Validacoes para plano FREE
+            if plano == "free":
+                # se já atingiu 3 usuários, bloqueia criação
+                if total_users >= 3:
+                    st.error("Limite atingido: plano Free permite até 3 usuários por unidade (1 admin_unidade + 2 users).")
                 else:
-                    st.error(f"Falha ao criar usuário: {msg}")
+                    # se está criando admin_unidade e já existe um, bloqueia
+                    if role == "admin_unidade" and total_admins >= 1:
+                        st.error("Já existe um admin_unidade cadastrado nesta unidade (plano Free permite apenas 1).")
+                    else:
+                        # prosseguir com criação (se SERVICE_ROLE_KEY disponível)
+                        if SERVICE_ROLE_KEY:
+                            ok, msg = create_user_via_service_role(email, nova_senha, novo_usuario.strip(), role, unidade_user)
+                            if ok:
+                                st.success("Usuário criado com sucesso (Auth + profile).")
+                                st.rerun()
+                            else:
+                                st.error(f"Falha ao criar usuário: {msg}")
+                        else:
+                            st.error("Criação de usuário via app exige SERVICE_ROLE_KEY configurada no servidor. Use o script de migração ou crie um endpoint admin seguro.")
             else:
-                st.error("Criação de usuário em produção via app exigiria SERVICE_ROLE_KEY (não configurada). Use o script de migração ou crie um endpoint admin seguro.")
+                # Premium: sem restrições
+                if SERVICE_ROLE_KEY:
+                    ok, msg = create_user_via_service_role(email, nova_senha, novo_usuario.strip(), role, unidade_user)
+                    if ok:
+                        st.success("Usuário criado com sucesso (Auth + profile).")
+                        st.rerun()
+                    else:
+                        st.error(f"Falha ao criar usuário: {msg}")
+                else:
+                    st.error("Criação de usuário via app exige SERVICE_ROLE_KEY configurada no servidor. Use o script de migração ou crie um endpoint admin seguro.")
 
     st.subheader("Usuários Cadastrados")
     # admin vê todos; admin_unidade vê só usuários da sua unidade
@@ -590,9 +618,7 @@ def main():
     unidade = selecionar_unidade()
     role = st.session_state.perfil
     paginas = ["Visualizar Cardápio"]
-    if role == "admin":
-        paginas += ["Administrar", "Avisos", "Usuarios"]
-    elif role == "admin_unidade":
+    if role in ["admin","admin_unidade"]:
         paginas += ["Administrar", "Avisos", "Usuarios"]
     escolha = st.sidebar.selectbox("Página", paginas)
     if escolha == "Visualizar Cardápio":
