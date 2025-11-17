@@ -313,11 +313,16 @@ def tela_login():
 # -------------------- Seletor e telas (adaptadas para profiles) --------------------
 def selecionar_unidade():
     st.sidebar.subheader("Unidade / Refeitório")
-    unidades = listar_unidades()
+
+    # Buscar lista com nome + plano
+    unidades = supabase.table("unidades").select("id, nome, plano").order("nome", desc=False).execute().data or []
     unidades_nomes = [u["nome"] for u in unidades]
 
+    # --- ADMIN ---
     if st.session_state.perfil == "admin":
         escolha = st.sidebar.selectbox("Selecione a unidade:", ["-- Criar nova --"] + unidades_nomes)
+
+        # Criar nova unidade
         if escolha == "-- Criar nova --":
             nome = st.sidebar.text_input("Nome da nova unidade")
             plano_novo = st.sidebar.selectbox("Plano da nova unidade", ["free","premium"])
@@ -327,12 +332,32 @@ def selecionar_unidade():
                     st.success("Unidade criada.")
                     st.rerun()
             return None
+
+        # Unidade selecionada → mostrar plano e permitir alterar
+        unidade_sel = next((u for u in unidades if u["nome"] == escolha), None)
+
+        if unidade_sel:
+            st.sidebar.markdown(f"### Plano atual: **{unidade_sel['plano'].upper()}**")
+
+            novo_plano = st.sidebar.selectbox(
+                "Alterar plano da unidade:",
+                ["free", "premium"],
+                index=0 if unidade_sel["plano"] == "free" else 1
+            )
+
+            if st.sidebar.button("Salvar novo plano"):
+                supabase.table("unidades").update({"plano": novo_plano}).eq("id", unidade_sel["id"]).execute()
+                st.success("Plano atualizado com sucesso!")
+                st.rerun()
+
         return escolha
 
+    # --- ADMIN_UNIDADE e USER ---
     if st.session_state.perfil in ["user", "admin_unidade"]:
         return st.session_state.unidade_user
 
     return None
+
 
 def selecionar_semana_ui():
     hoje = datetime.date.today()
