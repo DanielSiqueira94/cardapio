@@ -44,7 +44,7 @@ def sanitize_filename(text: str):
     text = re.sub(r"[^a-zA-Z0-9_\-]", "_", text)
     return text
 
-# -------------------- DB wrappers (cardapio/avisos unchanged) --------------------
+# -------------------- DB WRAPPERS --------------------
 def listar_unidades():
     try:
         resp = supabase.table("unidades").select("nome, plano").order("nome", desc=False).execute()
@@ -180,13 +180,8 @@ def salvar_imagem_upload(file_obj, prefix):
         st.error(f"Erro ao enviar imagem: {e}")
         return None
 
-# -------------------- AUTH / PROFILES helpers --------------------
+# -------------------- AUTH / PROFILES --------------------
 def sign_in(email_or_usuario, senha):
-    """
-    Login compatível com supabase-py 2.x
-    - Se usuário digitar nome (usuario_text), buscamos email no profiles.
-    - Se digitar email, logamos direto.
-    """
     email = email_or_usuario.strip()
     if "@" not in email:
         resp = supabase.table("profiles").select("email").ilike("usuario_text", email_or_usuario).limit(1).execute()
@@ -197,11 +192,7 @@ def sign_in(email_or_usuario, senha):
 
     try:
         auth_resp = supabase.auth.sign_in_with_password({"email": email, "password": senha})
-        user = auth_resp.user
-        session = auth_resp.session
-        if user:
-            return user, session
-        return None, None
+        return auth_resp.user, auth_resp.session
     except Exception as e:
         st.error(f"Erro ao autenticar: {e}")
         return None, None
@@ -209,14 +200,12 @@ def sign_in(email_or_usuario, senha):
 def get_profile(user_id):
     if not user_id:
         return None
-    # user_id may be uuid or string
     resp = supabase.table("profiles").select("*").eq("id", str(user_id)).limit(1).execute()
     if resp.data:
         return resp.data[0]
     return None
 
 def get_unidade_plano(unidade_nome):
-    """Retorna 'free' ou 'premium' para a unidade (por nome)"""
     resp = supabase.table("unidades").select("plano").eq("nome", unidade_nome).limit(1).execute()
     if resp.data:
         return resp.data[0].get("plano", "free")
@@ -224,23 +213,16 @@ def get_unidade_plano(unidade_nome):
 
 def count_users_in_unidade(unidade_nome):
     resp = supabase.table("profiles").select("id").eq("unidade", unidade_nome).execute()
-    if resp.data:
-        return len(resp.data)
-    return 0
+    return len(resp.data or [])
 
 def count_admin_unidade_in_unidade(unidade_nome):
     resp = supabase.table("profiles").select("id").eq("unidade", unidade_nome).eq("role", "admin_unidade").execute()
-    if resp.data:
-        return len(resp.data)
-    return 0
+    return len(resp.data or [])
 
 def create_user_via_service_role(email, password, usuario_text, role, unidade):
-    """
-    Cria usuário no auth via admin endpoint (requer SERVICE_ROLE_KEY).
-    Retorna (success, message).
-    """
     if not SERVICE_ROLE_KEY:
-        return False, "SERVICE_ROLE_KEY não configurada no servidor. Create users via admin endpoint seguro."
+        return False, "SERVICE_ROLE_KEY não configurada."
+
     import requests, json
     url = SUPABASE_URL.rstrip("/") + "/auth/v1/admin/users"
     headers = {
@@ -255,11 +237,12 @@ def create_user_via_service_role(email, password, usuario_text, role, unidade):
         "user_metadata": {"usuario_text": usuario_text}
     }
     r = requests.post(url, headers=headers, data=json.dumps(payload))
-    if r.status_code not in (200,201):
+    if r.status_code not in (200, 201):
         return False, f"Erro criando auth user: {r.status_code} {r.text}"
+
     user = r.json()
     user_id = user.get("id")
-    # insert profile
+
     try:
         supabase.table("profiles").insert({
             "id": user_id,
@@ -270,9 +253,10 @@ def create_user_via_service_role(email, password, usuario_text, role, unidade):
         }).execute()
     except Exception as e:
         return False, f"Erro ao inserir profile: {e}"
+
     return True, "Usuário criado com sucesso."
 
-# -------------------- UI: Login --------------------
+# -------------------- UI: LOGIN --------------------
 def css_login():
     st.markdown("""
     <style>
@@ -299,33 +283,30 @@ def tela_login():
         if not user:
             st.error("Usuário ou senha incorretos.")
         else:
-            # salva sessão e perfil
             st.session_state.user = user
             st.session_state.session = session
-            # buscar profile (user.id is attribute)
+
             profile = get_profile(user.id)
-            st.session_state.perfil = profile["role"] if profile and profile.get("role") else "user"
+            st.session_state.perfil = profile["role"] if profile else "user"
             st.session_state.unidade_user = profile.get("unidade") if profile else ""
             st.session_state.usuario = profile.get("usuario_text") or user.email
+
             st.success("Logado!")
             st.rerun()
 
-# -------------------- Seletor e telas (adaptadas para profiles) --------------------
+# -------------------- TELAS / SELETORES --------------------
 def selecionar_unidade():
     st.sidebar.subheader("Unidade / Refeitório")
 
-    # Buscar lista com nome + plano
     unidades = supabase.table("unidades").select("id, nome, plano").order("nome", desc=False).execute().data or []
     unidades_nomes = [u["nome"] for u in unidades]
 
-    # --- ADMIN ---
     if st.session_state.perfil == "admin":
         escolha = st.sidebar.selectbox("Selecione a unidade:", ["-- Criar nova --"] + unidades_nomes)
 
-        # Criar nova unidade
         if escolha == "-- Criar nova --":
             nome = st.sidebar.text_input("Nome da nova unidade")
-            plano_novo = st.sidebar.selectbox("Plano da nova unidade", ["free","premium"])
+            plano_novo = st.sidebar.selectbox("Plano da nova unidade", ["free", "premium"])
             if st.sidebar.button("Criar"):
                 if nome.strip():
                     criar_unidade(nome.strip(), plano=plano_novo)
@@ -333,7 +314,6 @@ def selecionar_unidade():
                     st.rerun()
             return None
 
-        # Unidade selecionada → mostrar plano e permitir alterar
         unidade_sel = next((u for u in unidades if u["nome"] == escolha), None)
 
         if unidade_sel:
@@ -347,17 +327,15 @@ def selecionar_unidade():
 
             if st.sidebar.button("Salvar novo plano"):
                 supabase.table("unidades").update({"plano": novo_plano}).eq("id", unidade_sel["id"]).execute()
-                st.success("Plano atualizado com sucesso!")
+                st.success("Plano atualizado!")
                 st.rerun()
 
         return escolha
 
-    # --- ADMIN_UNIDADE e USER ---
     if st.session_state.perfil in ["user", "admin_unidade"]:
         return st.session_state.unidade_user
 
     return None
-
 
 def selecionar_semana_ui():
     hoje = datetime.date.today()
@@ -369,24 +347,23 @@ def selecionar_semana_ui():
     return segunda, chave, label
 
 def tela_usuario(unidade):
-    st.sidebar.subheader(f"Usuário: {st.session_state.usuario}")
-    if st.sidebar.button("Sair"):
-        supabase.auth.sign_out()
-        st.session_state.clear()
-        st.rerun()
     if not unidade:
         st.info("Selecione uma unidade.")
         return
+
     st.title("📘 Cardápio da Semana")
+
     avisos = listar_avisos(unidade)
     if avisos:
         st.markdown("## 🔔 Avisos do Refeitório")
         for av in avisos:
             st.info(f"**{av['titulo']}**\n\n{av['mensagem']}")
         st.markdown("---")
+
     segunda, chave, label = selecionar_semana_ui()
     dados = buscar_cardapio_semana(unidade, chave)
-    dias = ["sexta", "quinta", "quarta", "terca", "segunda"][::-1]
+
+    dias = ["segunda", "terca", "quarta", "quinta", "sexta"]
     nomes = {
         "segunda": "Segunda-feira",
         "terca": "Terça-feira",
@@ -395,6 +372,7 @@ def tela_usuario(unidade):
         "sexta": "Sexta-feira",
     }
     categorias = ["Almoço", "Jantar"]
+
     for d in dias:
         st.subheader(nomes[d])
         bloco = dados.get(d, {})
@@ -412,6 +390,7 @@ def tela_usuario(unidade):
                         col1.image(item["imagem"], width=120)
                     except Exception:
                         pass
+
                 col2.markdown(
                     f"**{c}**<br>"
                     f"Guarnição: {item['guarnicao']}<br>"
@@ -422,19 +401,17 @@ def tela_usuario(unidade):
         st.markdown("---")
 
 def tela_admin(unidade):
-    st.sidebar.subheader(f"Admin: {st.session_state.usuario}")
-    if st.sidebar.button("Sair"):
-        supabase.auth.sign_out()
-        st.session_state.clear()
-        st.rerun()
     if not unidade:
         st.info("Selecione uma unidade.")
         return
+
     st.title("🛠️ Administração do Cardápio")
+
     segunda, chave, label = selecionar_semana_ui()
     dias = ["segunda", "terca", "quarta", "quinta", "sexta"]
     categorias = ["Almoço", "Jantar"]
     key_temp = f"tmp_{unidade}_{chave}"
+
     if key_temp not in st.session_state:
         origem = buscar_cardapio_semana(unidade, chave)
         st.session_state[key_temp] = {
@@ -450,43 +427,54 @@ def tela_admin(unidade):
             }
             for d in dias
         }
+
     with st.form("form_cardapio"):
         for d in dias:
             st.subheader(f"📌 {d.capitalize()}")
             for c in categorias:
                 st.markdown(f"**{c}**")
                 temp = st.session_state[key_temp][d][c]
+
                 temp["guarnicao"] = st.text_input(f"Guarnição ({d}-{c})", temp["guarnicao"])
                 temp["proteina"] = st.text_input(f"Proteína ({d}-{c})", temp["proteina"])
                 temp["sobremesa"] = st.text_input(f"Sobremesa ({d}-{c})", temp["sobremesa"])
-                img = st.file_uploader(f"Imagem ({d}-{c})", type=["jpg","jpeg","png"], key=f"img_{unidade}_{chave}_{d}_{c}")
+                img = st.file_uploader(f"Imagem ({d}-{c})", type=["jpg", "jpeg", "png"], key=f"img_{unidade}_{chave}_{d}_{c}")
                 if img:
                     temp["img_file"] = img
+
         salvar = st.form_submit_button("💾 Salvar Cardápio")
+
     if salvar:
         for d in dias:
             for c in categorias:
                 item = st.session_state[key_temp][d][c]
                 img_url = item.get("imagem")
+
                 if item["img_file"] is not None:
                     prefix = f"{unidade}_{chave}_{d}_{c}"
                     img_url = salvar_imagem_upload(item["img_file"], prefix)
                     item["imagem"] = img_url
+
                 if any([item["guarnicao"], item["proteina"], item["sobremesa"]]):
                     salvar_cardapio(unidade, chave, d, c, item["guarnicao"], item["proteina"], item["sobremesa"], img_url)
+
         st.success(f"Cardápio da {label} salvo com sucesso!")
         st.rerun()
 
 def tela_avisos(unidade):
     st.title("🔔 Avisos do Refeitório")
+
     if not unidade:
         st.info("Selecione uma unidade.")
         return
+
     st.subheader("Criar novo aviso")
+
     with st.form("form_aviso"):
         titulo = st.text_input("Título")
         mensagem = st.text_area("Mensagem", height=120)
         publicar = st.form_submit_button("📣 Publicar Aviso")
+
     if publicar:
         if titulo.strip() and mensagem.strip():
             criar_aviso(unidade, titulo.strip(), mensagem.strip())
@@ -494,7 +482,9 @@ def tela_avisos(unidade):
             st.rerun()
         else:
             st.error("Título e mensagem obrigatórios.")
+
     st.subheader("Avisos ativos")
+
     avisos = listar_avisos(unidade)
     if not avisos:
         st.write("Nenhum aviso ativo.")
@@ -502,7 +492,8 @@ def tela_avisos(unidade):
         for av in avisos:
             with st.expander(f"{av['titulo']} — {av['criado_em']}"):
                 st.write(av["mensagem"])
-                pode_desativar = st.session_state.perfil in ["admin","admin_unidade"]
+                pode_desativar = st.session_state.perfil in ["admin", "admin_unidade"]
+
                 if pode_desativar:
                     if st.button(f"Desativar aviso {av['id']}", key=f"del_{av['id']}"):
                         desativar_aviso(av["id"])
@@ -510,16 +501,10 @@ def tela_avisos(unidade):
                         st.rerun()
 
 def tela_usuarios():
-    if st.sidebar.button("Sair"):
-        supabase.auth.sign_out()
-        st.session_state.clear()
-        st.rerun()
-
     if st.session_state.perfil not in ["admin", "admin_unidade"]:
         st.error("Acesso negado.")
         return
 
-    st.sidebar.subheader(f"Admin: {st.session_state.usuario}")
     st.title("👥 Gerenciamento de Usuários")
     st.subheader("Cadastrar novo usuário")
 
@@ -530,14 +515,11 @@ def tela_usuarios():
 
         if st.session_state.perfil == "admin":
             role = st.selectbox("Perfil", ["user", "admin", "admin_unidade"])
-        else:
-            role = st.selectbox("Perfil", ["user", "admin_unidade"])
-
-        if st.session_state.perfil == "admin":
             unidades = listar_unidades()
             unidades_nomes = [u["nome"] for u in unidades]
             unidade_user = st.selectbox("Unidade do usuário", unidades_nomes)
         else:
+            role = st.selectbox("Perfil", ["user", "admin_unidade"])
             unidade_user = st.session_state.unidade_user
             st.write(f"Unidade: **{unidade_user}**")
 
@@ -545,92 +527,144 @@ def tela_usuarios():
 
     if criar:
         if not novo_usuario.strip() or not nova_senha.strip():
-            st.error("Usuário e senha são obrigatórios.")
+            st.error("Usuário e senha obrigatórios.")
         else:
-            # Determine email to use for auth
-            if novo_email.strip():
-                email = novo_email.strip()
-            else:
-                safe = novo_usuario.strip().replace(" ", "_")
-                email = f"{safe}@local.invalid"
+            email = novo_email.strip() if novo_email.strip() else novo_usuario.strip().replace(" ", "_") + "@local.invalid"
 
-            # CHECK: plano da unidade
             plano = get_unidade_plano(unidade_user)
             total_users = count_users_in_unidade(unidade_user)
             total_admins = count_admin_unidade_in_unidade(unidade_user)
 
-            # Validacoes para plano FREE
             if plano == "free":
-                # se já atingiu 3 usuários, bloqueia criação
                 if total_users >= 3:
-                    st.error("Limite atingido: plano Free permite até 3 usuários por unidade (1 admin_unidade + 2 users).")
+                    st.error("Limite do plano Free alcançado (até 3 usuários).")
                 else:
-                    # se está criando admin_unidade e já existe um, bloqueia
                     if role == "admin_unidade" and total_admins >= 1:
-                        st.error("Já existe um admin_unidade cadastrado nesta unidade (plano Free permite apenas 1).")
+                        st.error("Plano Free permite apenas 1 admin_unidade.")
                     else:
-                        # prosseguir com criação (se SERVICE_ROLE_KEY disponível)
                         if SERVICE_ROLE_KEY:
                             ok, msg = create_user_via_service_role(email, nova_senha, novo_usuario.strip(), role, unidade_user)
                             if ok:
-                                st.success("Usuário criado com sucesso (Auth + profile).")
+                                st.success("Usuário criado!")
                                 st.rerun()
                             else:
-                                st.error(f"Falha ao criar usuário: {msg}")
+                                st.error(msg)
                         else:
-                            st.error("Criação de usuário via app exige SERVICE_ROLE_KEY configurada no servidor. Use o script de migração ou crie um endpoint admin seguro.")
+                            st.error("SERVICE_ROLE_KEY não configurada.")
             else:
-                # Premium: sem restrições
                 if SERVICE_ROLE_KEY:
                     ok, msg = create_user_via_service_role(email, nova_senha, novo_usuario.strip(), role, unidade_user)
                     if ok:
-                        st.success("Usuário criado com sucesso (Auth + profile).")
+                        st.success("Usuário criado!")
                         st.rerun()
                     else:
-                        st.error(f"Falha ao criar usuário: {msg}")
+                        st.error(msg)
                 else:
-                    st.error("Criação de usuário via app exige SERVICE_ROLE_KEY configurada no servidor. Use o script de migração ou crie um endpoint admin seguro.")
+                    st.error("SERVICE_ROLE_KEY não configurada.")
 
     st.subheader("Usuários Cadastrados")
-    # admin vê todos; admin_unidade vê só usuários da sua unidade
+
     if st.session_state.perfil == "admin":
-        lista = supabase.table("profiles").select("id, email, usuario_text, role, unidade").execute().data or []
+        lista = supabase.table("profiles").select("*").execute().data or []
     else:
-        lista = supabase.table("profiles").select("id, email, usuario_text, role, unidade").eq("unidade", st.session_state.unidade_user).execute().data or []
+        lista = supabase.table("profiles").select("*").eq("unidade", st.session_state.unidade_user).execute().data or []
 
     if lista:
         for u in lista:
-            col1, col2, col3, col4 = st.columns([3,2,2,2])
+            col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
             col1.write(f"👤 {u.get('usuario_text') or u.get('email')}")
             col2.write(f"🔑 {u.get('role')}")
             col3.write(f"🏢 {u.get('unidade')}")
-            pode_excluir = False
-            if st.session_state.perfil == "admin":
-                pode_excluir = True
-            elif st.session_state.perfil == "admin_unidade" and u.get("unidade") == st.session_state.unidade_user:
-                pode_excluir = True
+
+            pode_excluir = (
+                st.session_state.perfil == "admin"
+                or (st.session_state.perfil == "admin_unidade" and u.get("unidade") == st.session_state.unidade_user)
+            )
+
             if pode_excluir:
                 if col4.button("Excluir", key=f"del_{u['id']}"):
-                    # Excluir user require service role key (admin endpoint). If not present, ask operator to delete manually.
                     if SERVICE_ROLE_KEY:
                         import requests, json
                         url = SUPABASE_URL.rstrip("/") + f"/auth/v1/admin/users/{u['id']}"
-                        headers = {"apikey": SERVICE_ROLE_KEY, "Authorization": f"Bearer {SERVICE_ROLE_KEY}"}
+                        headers = {
+                            "apikey": SERVICE_ROLE_KEY,
+                            "Authorization": f"Bearer {SERVICE_ROLE_KEY}"
+                        }
                         r = requests.delete(url, headers=headers)
-                        if r.status_code in (200,204):
-                            # remover profile
+                        if r.status_code in (200, 204):
                             supabase.table("profiles").delete().eq("id", u["id"]).execute()
-                            st.success("Usuário removido (Auth + profile).")
+                            st.success("Usuário removido.")
                             st.rerun()
                         else:
-                            st.error(f"Erro ao excluir auth user: {r.status_code} {r.text}")
+                            st.error(f"Erro ao excluir: {r.status_code} {r.text}")
                     else:
-                        st.error("Remoção programática exige SERVICE_ROLE_KEY. Delete manualmente pelo Supabase Dashboard ou configure SERVICE_ROLE_KEY no servidor.")
+                        st.error("SERVICE_ROLE_KEY não configurada.")
             else:
                 col4.write("—")
     else:
         st.info("Nenhum usuário cadastrado.")
 
+# -------------------- TELA MEU PLANO --------------------
+def tela_meu_plano(unidade):
+    st.title("📦 Meu Plano")
+
+    if not unidade:
+        st.info("Selecione uma unidade.")
+        return
+
+    resp = supabase.table("unidades").select("nome, plano").eq("nome", unidade).limit(1).execute()
+    if not resp.data:
+        st.error("Unidade não encontrada.")
+        return
+
+    unidade_info = resp.data[0]
+    plano = unidade_info["plano"]
+
+    st.subheader(f"🏢 Unidade: **{unidade_info['nome']}**")
+    st.markdown(f"### 🌟 Plano atual: **{plano.upper()}**")
+
+    st.markdown("---")
+
+    pode_mudar = st.session_state.perfil in ["admin", "admin_unidade"]
+
+    if plano == "free":
+        st.info("""
+### 🆓 Plano FREE
+- Até **3 usuários**
+- Cadastro de cardápio
+- Avisos
+- Upload de imagens
+- Login admin_unidade
+""")
+
+        st.markdown("### 🚀 Benefícios do Premium")
+
+        st.markdown("""
+- Usuários ilimitados  
+- Suporte  
+- Sem restrições  
+""")
+
+        if pode_mudar:
+            if st.button("💳 Fazer upgrade para Premium"):
+                st.warning("Integração de pagamento ainda não implementada.")
+        else:
+            st.caption("🔒 Apenas administradores podem alterar o plano.")
+
+    else:
+        st.success("""
+### 🏆 Plano PREMIUM
+- Usuários ilimitados  
+- Suporte incluído  
+""")
+
+        if pode_mudar:
+            if st.button("Gerenciar Assinatura"):
+                st.warning("Portal de assinatura ainda não implementado.")
+        else:
+            st.caption("🔒 Apenas administradores podem acessar opções de assinatura.")
+
+# -------------------- MAIN --------------------
 def main():
     if "perfil" not in st.session_state:
         st.session_state.perfil = None
@@ -640,14 +674,28 @@ def main():
         return
 
     st.markdown("<style>[data-testid='stSidebar'] { display:block !important; }</style>", unsafe_allow_html=True)
+
+    # 🔴 Sair sempre no sidebar
+    st.sidebar.markdown(f"👤 **{st.session_state.usuario}**")
+    if st.sidebar.button("Sair"):
+        supabase.auth.sign_out()
+        st.session_state.clear()
+        st.rerun()
+
     unidade = selecionar_unidade()
     role = st.session_state.perfil
-    paginas = ["Visualizar Cardápio"]
-    if role in ["admin","admin_unidade"]:
-        paginas += ["Administrar", "Avisos", "Usuarios"]
+
+    if role in ["admin", "admin_unidade"]:
+        paginas = ["Visualizar Cardápio", "Meu Plano", "Administrar", "Avisos", "Usuarios"]
+    else:
+        paginas = ["Visualizar Cardápio"]
+
     escolha = st.sidebar.selectbox("Página", paginas)
+
     if escolha == "Visualizar Cardápio":
         tela_usuario(unidade)
+    elif escolha == "Meu Plano":
+        tela_meu_plano(unidade)
     elif escolha == "Administrar":
         tela_admin(unidade)
     elif escolha == "Avisos":
