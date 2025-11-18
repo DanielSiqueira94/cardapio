@@ -400,15 +400,15 @@ def tela_usuario(unidade):
                         col1.image(item["imagem"], width=120)
                     except Exception:
                         pass
-
+               
                 col2.markdown(
                     f"**{c}**<br>"
-                    f"Guarnição: {item['guarnicao']}<br>"
-                    f"Prato principal: {item['proteina']}<br>"
-                    f"Salada: {item.get('salada', '')}<br>"
-                    f"Sobremesa: {item['sobremesa']}",
+                    f"**Guarnição:** {item['guarnicao']}<br>"
+                    f"**Prato principal:** {item['proteina']}<br>"
+                    f"**Salada:** {item.get('salada', '')}<br>"
+                    f"**Sobremesa:** {item['sobremesa']}",
                     unsafe_allow_html=True
-                )
+)                
         st.markdown("---")
 
 def tela_admin(unidade):
