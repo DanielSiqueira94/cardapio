@@ -78,53 +78,62 @@ def get_unidade_id(nome):
     except:
         return None
 
-def salvar_cardapio(unidade, semana, dia, categoria, guarnicao, proteina, sobremesa, imagem_url):
+def salvar_cardapio(unidade, semana, dia, categoria,
+                    guarnicao, proteina, salada, sobremesa, imagem_url):
+
     unidade_id = get_unidade_id(unidade)
     if not unidade_id:
         return
+
     busca = supabase.table("cardapios").select("id").match({
         "unidade_id": unidade_id,
         "semana_inicio": semana,
         "dia_semana": dia,
         "categoria": categoria
     }).execute()
+
+    payload = {
+        "guarnicao": guarnicao,
+        "proteina": proteina,   # prato principal
+        "salada": salada,
+        "sobremesa": sobremesa,
+        "imagem_url": imagem_url,
+        "criado_em": datetime.datetime.utcnow().isoformat()
+    }
+
     if busca.data:
-        supabase.table("cardapios").update({
-            "guarnicao": guarnicao,
-            "proteina": proteina,
-            "sobremesa": sobremesa,
-            "imagem_url": imagem_url,
-            "criado_em": datetime.datetime.utcnow().isoformat()
-        }).eq("id", busca.data[0]["id"]).execute()
+        supabase.table("cardapios").update(payload).eq("id", busca.data[0]["id"]).execute()
     else:
-        supabase.table("cardapios").insert({
+        payload.update({
             "unidade_id": unidade_id,
             "semana_inicio": semana,
             "dia_semana": dia,
-            "categoria": categoria,
-            "guarnicao": guarnicao,
-            "proteina": proteina,
-            "sobremesa": sobremesa,
-            "imagem_url": imagem_url
-        }).execute()
+            "categoria": categoria
+        })
+        supabase.table("cardapios").insert(payload).execute()
+
 
 def buscar_cardapio_semana(unidade, semana):
     unidade_id = get_unidade_id(unidade)
     if not unidade_id:
         return {}
+
     resp = supabase.table("cardapios").select("*").match({
         "unidade_id": unidade_id,
         "semana_inicio": semana
     }).execute()
+
     dias = {}
     for r in resp.data or []:
         dias.setdefault(r["dia_semana"], {})[r["categoria"]] = {
             "guarnicao": r.get("guarnicao", ""),
-            "proteina": r.get("proteina", ""),
+            "proteina": r.get("proteina", ""),  # prato principal
+            "salada": r.get("salada", ""),
             "sobremesa": r.get("sobremesa", ""),
             "imagem": r.get("imagem_url")
         }
     return dias
+
 
 # Avisos
 def criar_aviso(unidade_nome, titulo, mensagem):
@@ -395,7 +404,8 @@ def tela_usuario(unidade):
                 col2.markdown(
                     f"**{c}**<br>"
                     f"Guarnição: {item['guarnicao']}<br>"
-                    f"Proteína: {item['proteina']}<br>"
+                    f"Prato principal: {item['proteina']}<br>"
+                    f"Salada: {item.get('salada', '')}<br>"
                     f"Sobremesa: {item['sobremesa']}",
                     unsafe_allow_html=True
                 )
@@ -420,6 +430,7 @@ def tela_admin(unidade):
                 c: {
                     "guarnicao": origem.get(d, {}).get(c, {}).get("guarnicao", ""),
                     "proteina": origem.get(d, {}).get(c, {}).get("proteina", ""),
+                    "salada": origem.get(d, {}).get(c, {}).get("salada", ""),
                     "sobremesa": origem.get(d, {}).get(c, {}).get("sobremesa", ""),
                     "imagem": origem.get(d, {}).get(c, {}).get("imagem", None),
                     "img_file": None
@@ -437,8 +448,10 @@ def tela_admin(unidade):
                 temp = st.session_state[key_temp][d][c]
 
                 temp["guarnicao"] = st.text_input(f"Guarnição ({d}-{c})", temp["guarnicao"])
-                temp["proteina"] = st.text_input(f"Proteína ({d}-{c})", temp["proteina"])
+                temp["proteina"] = st.text_input(f"Prato principal ({d}-{c})", temp["proteina"])
+                temp["salada"] = st.text_input(f"Salada ({d}-{c})", temp["salada"])
                 temp["sobremesa"] = st.text_input(f"Sobremesa ({d}-{c})", temp["sobremesa"])
+
 
                 img = st.file_uploader(
                     f"Imagem ({d}-{c})",
@@ -461,9 +474,14 @@ def tela_admin(unidade):
                     img_url = salvar_imagem_upload(item["img_file"], prefix)
                     item["imagem"] = img_url
 
-                if any([item["guarnicao"], item["proteina"], item["sobremesa"]]):
-                    salvar_cardapio(unidade, chave, d, c, item["guarnicao"],
-                                    item["proteina"], item["sobremesa"], img_url)
+                if any([item["guarnicao"], item["proteina"], item["salada"], item["sobremesa"]]):                                
+                    salvar_cardapio(unidade, chave, d, c,
+                                    item["guarnicao"],
+                                    item["proteina"],   # prato principal
+                                    item["salada"],
+                                    item["sobremesa"],
+                                    img_url)
+
 
         st.success(f"Cardápio da {label} salvo com sucesso!")
         st.rerun()
